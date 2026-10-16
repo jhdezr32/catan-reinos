@@ -1,0 +1,14 @@
+{
+  "name": "catan-reinos-en-guerra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Catán: Reinos en Guerra — multijugador online sobre Cloudflare Workers + Durable Objects",
+  "scripts": {
+    "build": "python3 build.py",
+    "local": "python3 build.py && node test/cf-sim.mjs",
+    "test": "python3 build.py && node test/engine.test.js && node test/rules2.test.js && node test/rules3.test.js && node test/skip.test.mjs && node test/integration.test.mjs && node test/ui.test.mjs && node test/ui-game.test.mjs",
+    "test:fast": "python3 build.py && node test/engine.test.js && node test/rules2.test.js && node test/rules3.test.js && node test/skip.test.mjs",
+    "deploy": "python3 build.py && wrangler deploy"
+  },
+  "devDependencies": { "playwright": "^1.56.0", "wrangler": "^4", "ws": "^8" }
+}

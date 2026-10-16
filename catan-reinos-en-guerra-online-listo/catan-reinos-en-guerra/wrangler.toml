@@ -1,0 +1,17 @@
+name = "catan-reinos"
+main = "dist/worker.js"
+compatibility_date = "2025-01-01"
+
+# Logs de producción (Cloudflare → Workers → catan-reinos → Logs) para depurar si algo falla.
+[observability]
+enabled = true
+
+# Cada sala de juego es un Durable Object "Game" (guarda el estado y los WebSockets de la sala).
+[[durable_objects.bindings]]
+name = "GAME"
+class_name = "Game"
+
+# El plan gratuito de Cloudflare SOLO admite Durable Objects con almacenamiento SQLite.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Game"]

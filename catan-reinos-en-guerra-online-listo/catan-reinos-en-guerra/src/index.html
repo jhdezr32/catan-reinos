@@ -1,0 +1,195 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CATÁN: REINOS EN GUERRA</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Georgia,serif;background:#2b1d12;color:#f1e3c4}h1{font-variant:small-caps;text-align:center;color:#e8b84a;margin:.4em;font-size:1.6em}h3{margin:.2em 0 .5em;color:#e8b84a}
+button,input,select{font:inherit;padding:.45em .8em;margin:.15em;border-radius:6px;border:1px solid #8a6a2f;background:#4a331c;color:#f1e3c4}button{cursor:pointer}button:disabled{opacity:.35;cursor:not-allowed}button.on,button.pri{background:#8a6a2f}input[type=number]{width:3.5em;padding:.25em}
+.w{max-width:1000px;margin:auto;padding:8px}.row{display:flex;flex-wrap:wrap;gap:10px}.p{flex:1;min-width:270px}.k{display:inline-block;width:12px;height:12px;border-radius:50%;border:1px solid #000;margin-right:6px;vertical-align:middle}
+.card{background:#3a2917;border:1px solid #6b4f26;border-radius:10px;padding:10px;margin:6px 0}.hint{color:#e8b84a;font-weight:bold}.muted{opacity:.7;font-size:.9em}
+#log{font-size:12px;max-height:140px;overflow:auto}#t{position:fixed;bottom:10px;left:50%;transform:translateX(-50%);background:#a33;padding:8px 14px;border-radius:8px;display:none;z-index:30;max-width:92vw}
+#st{position:fixed;top:0;left:0;right:0;background:#b8860b;color:#000;text-align:center;padding:4px;display:none;z-index:25;font-size:14px}
+#err{background:#6b1d1d;border:1px solid #c44;border-radius:8px;padding:8px 12px;margin:8px 0;display:none}
+svg{width:100%;max-height:78vh;background:#1d5a8a;border-radius:10px;touch-action:manipulation}svg [data-a]{cursor:pointer}
+.mb{position:fixed;inset:0;background:#000a;display:flex;align-items:center;justify-content:center;z-index:20;padding:10px}.mc{background:#3a2917;border:2px solid #8a6a2f;border-radius:12px;padding:14px;max-width:460px;width:100%;max-height:90vh;overflow:auto}.ma{text-align:right;margin-top:8px}
+.res{display:inline-block;margin:2px 8px 2px 0;white-space:nowrap}table{border-collapse:collapse}td{padding:2px 6px}
+</style></head><body>
+<div id="st"></div>
+<div class="w"><h1>⚔ Catán: Reinos en Guerra ⚔</h1><div id="err" role="alert"></div><div id="a"></div></div>
+<div id="m"></div><div id="t"></div>
+<script>
+// Si el frontend se aloja en un dominio distinto al del servidor Worker, pon aquí su URL (https://....workers.dev). Vacío = mismo dominio.
+window.CATAN_SERVER=window.CATAN_SERVER||'';
+const $=i=>document.getElementById(i),SERVER=String(window.CATAN_SERVER).replace(/\/$/,''),
+COL={azul:'#2f5fd0',amarillo:'#e0b400',rojo:'#c0392b',blanco:'#f4f4f4'},KN={azul:'Reino de Asturias',amarillo:'Reino de Rumanía',rojo:'Reino de Alemania',blanco:'Reino de Canarias'},
+HC={madera:'#2e6b2e',arcilla:'#b5532f',lana:'#9acd5a',trigo:'#e6c84a',mineral:'#7f8591',desierto:'#d9c58f'},RES=['madera','arcilla','lana','trigo','mineral'],
+EMO={madera:'🌲',arcilla:'🧱',lana:'🐑',trigo:'🌾',mineral:'⛰️'},
+KD={caballero:'Caballero',pv:'Punto de victoria',carreteras:'Construir carreteras',monopolio:'Monopolio',abundancia:'Año de abundancia'};
+let ws,geo,S,code,tk,tool='settlement',retry=0,fatal=false,leaving=false,busy=false,rt,pingT,M=null,pickRobber=null;
+const RULES=`<p><b>Objetivo:</b> ser el primero en llegar a 10 puntos en tu turno.</p><p>Asentamiento = 1 punto, ciudad = 2, carta de punto de victoria = 1 (oculta), Camino más largo (mínimo 5 tramos) = 2, Ejército más grande (mínimo 3 caballeros) = 2.</p>
+<p><b>Costes:</b> carretera = madera + arcilla · asentamiento = madera + arcilla + lana + trigo · ciudad = 2 trigo + 3 mineral · carta = lana + trigo + mineral.</p>
+<p><b>Turno:</b> tira los dados; los hexágonos con ese número producen para sus asentamientos (1) y ciudades (2). Con un 7 se descarta la mitad si tienes más de 7 cartas y se mueve el ladrón (roba una carta a un vecino).</p>
+<p><b>Comercio:</b> banco 4:1, puerto 3:1 o 2:1 (si tienes un asentamiento o ciudad en él) y ofertas a los demás jugadores.</p>
+<p><b>Cartas:</b> no se puede jugar la que compraste este turno y solo una por turno (salvo puntos de victoria).</p>`;
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(m){const t=$('t');t.textContent=m;t.style.display='block';clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display='none',4000);}
+function status(m){const s=$('st');s.textContent=m||'';s.style.display=m?'block':'none';}
+function showErr(m,tech){const e=$('err');e.textContent=m||'';e.style.display=m?'block':'none';if(m)console.error('[catan] '+m,tech||'');}
+const tokKey=c=>'catan:tok:'+c,loadTok=c=>{try{return localStorage.getItem(tokKey(c))||''}catch{return''}},saveTok=(c,t)=>{try{localStorage.setItem(tokKey(c),t)}catch{}},clearTok=c=>{try{localStorage.removeItem(tokKey(c))}catch{}};
+
+// ---------- red ----------
+async function api(path,opt){
+ if(location.protocol==='file:'&&!SERVER)throw new Error('Esta página está abierta como archivo local (file://) y no tiene servidor detrás. Abre el enlace público de tu juego (https://…workers.dev) o el servidor local de pruebas.');
+ const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),12000);let r,d;
+ try{r=await fetch(SERVER+path,{...opt,signal:ctl.signal,headers:{'content-type':'application/json'}});}
+ catch(e){console.error('[catan] fallo de red en',path,e);throw new Error(e.name==='AbortError'?'El servidor tardó demasiado en responder. Inténtalo de nuevo.':'No se pudo contactar con el servidor del juego. Comprueba tu conexión y que has abierto el enlace correcto.');}
+ finally{clearTimeout(t);}
+ try{d=await r.json();}catch{console.error('[catan] respuesta no válida de',path,r.status);throw new Error('El servidor respondió algo inesperado (HTTP '+r.status+'). ¿Es este el enlace correcto del juego?');}
+ if(!r.ok||!d.ok){console.error('[catan] error de API',path,r.status,d);const e=new Error(d.error||'Error del servidor (HTTP '+r.status+').');e.code=d.code;throw e;}
+ return d;}
+function send(o){if(ws&&ws.readyState===1){ws.send(JSON.stringify({...o,token:tk}));return true;}toast('Sin conexión con el servidor; reintentando…');return false;}
+function act(a){if(!S||!S.game)return;send({t:'act',a:{...a,seq:S.game.seq}});}
+function connect(){
+ clearTimeout(rt);const base=SERVER?SERVER.replace(/^http/,'ws'):(location.protocol==='https:'?'wss://':'ws://')+location.host;let w;
+ try{w=new WebSocket(base+'/ws/'+code);}catch(e){return backHome('No se pudo abrir la conexión en tiempo real: '+e.message);}
+ ws=w;if(S)status('Reconectando…');
+ w.onopen=()=>{retry=0;w.send(JSON.stringify({t:'join',token:tk}));clearInterval(pingT);pingT=setInterval(()=>{if(w.readyState===1)w.send('{"t":"ping"}');},25000);};
+ w.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch{return}
+  if(m.t==='geo')geo=m.geo;else if(m.t==='err')toast(m.m);
+  else if(m.t==='fatal'){clearTok(code);backHome(m.m);}
+  else if(m.t==='left'){clearTok(code);location.hash='';backHome();}
+  else if(m.t==='state'){S=m;status('');render();}};
+ w.onerror=()=>console.error('[catan] error de WebSocket en la sala',code);
+ w.onclose=()=>{clearInterval(pingT);if(w!==ws||fatal||leaving)return;retry++;
+  if(retry>(S?15:3))return backHome(S?'Se perdió la conexión con el servidor y no se pudo recuperar. Recarga la página.':'No se pudo establecer la conexión en tiempo real con la sala. Inténtalo de nuevo.');
+  status(`Conexión perdida. Reintentando (${retry})…`);rt=setTimeout(connect,Math.min(1000*retry,6000));};}
+function enter(c){code=c;tk=loadTok(c);fatal=false;leaving=false;retry=0;S=null;location.hash=c;showErr('');
+ $('a').innerHTML='<p class="card">Conectando con la sala <b>'+esc(c)+'</b>…</p>';connect();}
+function backHome(msg){fatal=true;clearTimeout(rt);clearInterval(pingT);if(ws)try{ws.close();}catch{}S=null;status('');closeM();home();if(msg)showErr(msg);}
+
+// ---------- inicio ----------
+function home(){const h=(location.hash||'').slice(1).toUpperCase().replace(/[^A-Z0-9]/g,''),nm=(()=>{try{return localStorage.getItem('catan:name')||''}catch{return''}})();
+ $('a').innerHTML=`<div class="card"><p>Tu nombre: <input id="nm" maxlength="20" autocomplete="nickname" value="${esc(nm)}"></p>
+ <p><button id="bc" class="pri" data-a="create">Crear partida</button></p>
+ <p>…o únete con un código: <input id="cd" size="7" maxlength="8" value="${esc(h)}" style="text-transform:uppercase"> <button id="bj" data-a="join">Unirse</button></p>
+ <p><button data-a="rules">Reglas</button></p></div>${h?'<p class="muted">Has abierto un enlace de invitación: escribe tu nombre y pulsa «Unirse».</p>':''}`;
+ if(location.protocol==='file:'&&!SERVER)showErr('Esta página está abierta como archivo local (file://) y no tiene servidor detrás: no se podrán crear partidas. Abre el enlace público de tu juego.');}
+function setBusy(b,txt){busy=b;for(const id of['bc','bj']){const e=$(id);if(e)e.disabled=b;}const c=$('bc');if(c)c.textContent=b&&txt?txt:'Crear partida';}
+function readName(){const n=($('nm').value||'').replace(/\s+/g,' ').trim();
+ if(!n){showErr('Escribe tu nombre antes de continuar.');$('nm').focus();return null;}
+ if(n.length>20||/[<>&"'`]/.test(n)){showErr('El nombre debe tener 1-20 caracteres y no puede incluir < > & " \' `.');$('nm').focus();return null;}
+ try{localStorage.setItem('catan:name',n)}catch{}return n;}
+async function createGame(){if(busy)return;showErr('');const n=readName();if(!n)return;setBusy(true,'Creando partida…');
+ try{const d=await api('/api/create',{method:'POST',body:JSON.stringify({name:n})});saveTok(d.code,d.token);enter(d.code);}
+ catch(e){showErr(e.message,e);}finally{if($('bc'))setBusy(false);}}
+async function joinGame(){if(busy)return;showErr('');const n=readName();if(!n)return;
+ const c=($('cd').value||'').toUpperCase().replace(/[^A-Z0-9]/g,'');if(c.length!==5){showErr('Escribe el código de 5 letras/números de la partida (o abre el enlace de invitación).');$('cd').focus();return;}
+ setBusy(true);try{const d=await api('/api/join',{method:'POST',body:JSON.stringify({code:c,name:n,token:loadTok(c)})});saveTok(c,d.token);enter(c);}
+ catch(e){showErr(e.message,e);}finally{if($('bc'))setBusy(false);}}
+
+// ---------- modales ----------
+function closeM(){M=null;$('m').innerHTML='';}
+function modal(title,body,ok,onOk,cancelable=true){$('m').innerHTML=`<div class="mb"><div class="mc"><h3>${title}</h3>${body}<div class="ma">${cancelable?'<button data-a="closeM">Cancelar</button>':''}${ok?`<button class="pri" id="mo">${ok}</button>`:''}</div></div></div>`;
+ if(ok)$('mo').onclick=()=>{if(onOk()!==false)closeM();};}
+const num=id=>Math.max(0,parseInt($(id).value)||0);
+
+// ---------- lobby ----------
+function lobby(){const L=S.lobby,me=L.players[S.you],link=location.origin+location.pathname+'#'+code,host=S.you===0;
+ const kids=L.players.every(p=>p.kingdom)&&new Set(L.players.map(p=>p.kingdom)).size===L.players.length,all=L.players.every(p=>p.online),n=L.players.length,can=n>=3&&n<=4&&kids&&all;
+ const why=n<3?`Faltan jugadores (${n}/3 mínimo).`:!all?'Hay jugadores desconectados.':!kids?'Todos deben elegir un reino distinto.':'';
+ $('a').innerHTML=`<div class="card"><p>Código de partida: <b style="font-size:1.4em;letter-spacing:2px">${esc(code)}</b></p>
+ <p>Enlace de invitación: <input id="lk" readonly size="34" value="${esc(link)}"> <button data-a="copy">Copiar enlace</button></p>
+ <p class="muted">Tus amigos solo tienen que abrir el enlace, escribir su nombre y pulsar «Unirse».</p></div>
+ <div class="card"><p class="hint">Elige tu reino:</p>`+Object.keys(KN).map(k=>{const o=L.players.find(p=>p.kingdom===k);
+  return `<button data-a="pick" data-k="${k}" ${o&&o!==me?'disabled':''} class="${me.kingdom===k?'on':''}"><span class="k" style="background:${COL[k]}"></span>${KN[k]}${o?' — '+esc(o.name):''}</button>`;}).join('')+`</div>
+ <div class="card"><p class="hint">Jugadores (${n}/4):</p><ul>${L.players.map((p,i)=>`<li>${p.online?'🟢':'⚪'} <b>${esc(p.name)}</b>${i===0?' 👑 anfitrión':''}${i===S.you?' (tú)':''} — ${p.kingdom?`<span class="k" style="background:${COL[p.kingdom]}"></span>${KN[p.kingdom]}`:'<i>sin reino</i>'}${host&&!p.online?` <button data-a="kick" data-i="${i}">Expulsar</button>`:''}</li>`).join('')}</ul></div>
+ <p>${host?`<button class="pri" data-a="start" ${can?'':'disabled'}>Empezar partida (3-4 jugadores)</button> <span class="muted">${why}</span>`:'<span class="muted">Esperando a que el anfitrión empiece la partida…</span>'}
+ <button data-a="leave">Abandonar sala</button></p>`;}
+
+// ---------- reglas del cliente (solo para resaltar; el servidor valida siempre) ----------
+function topo(){if(geo.ve)return;geo.ve={};geo.adj={};for(const e in geo.E){const[a,b]=geo.E[e];(geo.ve[a]=geo.ve[a]||[]).push(e);(geo.ve[b]=geo.ve[b]||[]).push(e);(geo.adj[a]=geo.adj[a]||[]).push(b);(geo.adj[b]=geo.adj[b]||[]).push(a);}}
+const settleOk=(g,i,v,setup)=>!g.bld[v]&&geo.adj[v].every(a=>!g.bld[a])&&(setup||geo.ve[v].some(e=>g.roads[e]===i));
+function roadOk(g,i,e,setup){if(g.roads[e]!==undefined)return false;const[a,b]=geo.E[e];if(setup)return g.lastSettle===a||g.lastSettle===b;
+ const ok=v=>(g.bld[v]&&g.bld[v].p===i)||(!(g.bld[v]&&g.bld[v].p!==i)&&geo.ve[v].some(x=>g.roads[x]===i));return ok(a)||ok(b);}
+function ratio(g,i,r){let q=4;for(const p of g.ports||[])if(p.v.some(v=>g.bld[v]&&g.bld[v].p===i)){if(p.t==='3:1')q=Math.min(q,3);else if(p.t===r)q=Math.min(q,2);}return q;}
+const curp=g=>g.phase==='setup'?g.setupOrder[g.setupStep]:g.turn;
+const fmt=o=>RES.filter(r=>o[r]).map(r=>o[r]+' '+EMO[r]).join(' ')||'—';
+const afford=(me,c)=>Object.keys(c).every(r=>me.res[r]>=c[r]);
+
+// ---------- partida ----------
+function game(){topo();const g=S.game,me=g.players[S.you],my=curp(g)===S.you,L=S.lobby,main=my&&g.phase==='main',setup=g.phase==='setup',ended=g.winner!==null;
+ let eff=setup?g.sub:g.phase==='roads'?'road':tool;
+ const P=([x,y])=>[x*50,y*50];let svg='';
+ g.hexes.forEach((h,i)=>{const H=geo.hexes[i],cx=H.cx*50,cy=H.cy*50;svg+=`<polygon points="${H.v.map(v=>P(geo.V[v])).join(' ')}" fill="${HC[h.t]}" stroke="#222" stroke-width="2" ${g.phase==='robber'&&my?`data-a="hex" data-i="${i}"`:''}/>
+  <text x="${cx}" y="${cy-14}" text-anchor="middle" font-size="15" pointer-events="none">${EMO[h.t]||'🏜️'}</text>`;
+  if(h.n)svg+=`<circle cx="${cx}" cy="${cy+6}" r="13" fill="#f4e7c3" stroke="#222" pointer-events="none"/><text x="${cx}" y="${cy+11}" text-anchor="middle" font-size="14" font-weight="bold" fill="${h.n===6||h.n===8?'#b00':'#000'}" pointer-events="none">${h.n}</text>`;
+  if(g.robber===i)svg+=`<circle cx="${cx}" cy="${cy-2}" r="9" fill="#111" stroke="#fff" pointer-events="none"/>`;});
+ (g.ports||[]).forEach(p=>{const[a,b]=p.v.map(v=>P(geo.V[v])),mx=(a[0]+b[0])/2,my2=(a[1]+b[1])/2,f=1.16;
+  svg+=`<line x1="${a[0]}" y1="${a[1]}" x2="${mx*f}" y2="${my2*f}" stroke="#f1e3c4" stroke-width="1.5" pointer-events="none"/><line x1="${b[0]}" y1="${b[1]}" x2="${mx*f}" y2="${my2*f}" stroke="#f1e3c4" stroke-width="1.5" pointer-events="none"/>
+  <text x="${mx*f*1.06}" y="${my2*f*1.06+4}" text-anchor="middle" font-size="11" fill="#fff" pointer-events="none">${p.t==='3:1'?'3:1':'2:1 '+EMO[p.t]}</text>`;});
+ const showRoads=my&&((setup&&g.sub==='road')||g.phase==='roads'||(main&&eff==='road'));
+ for(const e in geo.E){const[a,b]=geo.E[e].map(v=>P(geo.V[v])),o=g.roads[e];
+  if(o!==undefined)svg+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#000" stroke-width="9" stroke-linecap="round" pointer-events="none"/><line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${COL[g.players[o].kingdom]}" stroke-width="6" stroke-linecap="round" pointer-events="none"/>`;
+  else if(showRoads&&roadOk(g,S.you,e,setup))svg+=`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="#7CFC00" stroke-opacity=".55" stroke-width="10" stroke-linecap="round" data-a="road" data-e="${e}"/>`;}
+ const showCity=main&&eff==='city',cityOk=b=>showCity&&b.p===S.you&&b.t==='settlement',showSet=my&&((setup&&g.sub==='settlement')||(main&&eff==='settlement'));
+ for(const v in geo.V){const[x,y]=P(geo.V[v]),b=g.bld[v];
+  if(b){const s=b.t==='city'?10:7;svg+=`<rect x="${x-s}" y="${y-s}" width="${2*s}" height="${2*s}" rx="${b.t==='city'?2:7}" fill="${COL[g.players[b.p].kingdom]}" stroke="${cityOk(b)?'#7CFC00':'#000'}" stroke-width="${cityOk(b)?4:2}" ${cityOk(b)?`data-a="city" data-v="${v}"`:'pointer-events="none"'}/>`;}
+  else if(showSet&&settleOk(g,S.you,v,setup))svg+=`<circle cx="${x}" cy="${y}" r="8" fill="#7CFC00" fill-opacity=".6" stroke="#fff" data-a="settle" data-v="${v}"/>`;}
+ const need=g.discard&&g.discard[S.you],ph={setup:my?(g.sub==='settlement'?'Coloca un asentamiento (puntos verdes).':'Coloca una carretera junto a tu último asentamiento.'):'Colocación inicial: turno de '+g.players[curp(g)].name+'.',
+  roll:my?'Tira los dados.':'Turno de '+g.players[g.turn].name+'.',discard:need?`Debes descartar ${need} cartas.`:'Esperando descartes (7).',
+  robber:my?'Mueve el ladrón: pulsa un hexágono.':g.players[g.turn].name+' mueve el ladrón.',roads:my?`Construye carreteras gratis (te quedan ${g.freeRoads}).`:g.players[g.turn].name+' construye carreteras.',
+  main:my?'Tu turno: construye, comercia o termina el turno.':'Turno de '+g.players[g.turn].name+'.',ended:'Partida terminada.'}[g.phase]||'';
+ const blockers=g.phase==='discard'?Object.keys(g.discard).map(Number):[curp(g)],stuck=S.you===0&&!ended&&g.phase!=='setup'&&blockers.some(k=>!L.players[k].online),stuckS=S.you===0&&!ended&&g.phase==='setup'&&!L.players[curp(g)].online;
+ const d=g.dice?g.dice[0]+' + '+g.dice[1]+' = '+(g.dice[0]+g.dice[1]):'—';
+ const devs=me.dev.map(c=>{const bought=c.t>=g.turnNo;if(c.k==='pv')return`<span class="res">🏆 ${KD.pv} (oculto)</span>`;
+  const ok=my&&!g.devPlayed&&!bought&&(c.k==='caballero'?(g.phase==='roll'||g.phase==='main'):g.phase==='main');
+  return`<button data-a="play" data-k="${c.k}" ${ok?'':'disabled'} title="${bought?'Comprada este turno: no se puede jugar todavía':''}">${KD[c.k]}${bought?' (nueva)':''}</button>`;}).join(' ')||'<span class="muted">ninguna</span>';
+ const offers=g.offers.map(o=>{const mine=o.from===S.you,can=!mine&&g.phase==='main'&&RES.every(r=>(o.want[r]||0)<=me.res[r]);
+  return`<div class="card">${esc(g.players[o.from].name)} da ${fmt(o.give)} por ${fmt(o.want)} ${mine?`<button data-a="cancel" data-id="${o.id}">Cancelar</button>`:`<button data-a="accept" data-id="${o.id}" ${can?'':'disabled'}>Aceptar</button><button data-a="reject" data-id="${o.id}" ${o.rej.includes(S.you)?'disabled':''}>Rechazar</button>`}</div>`;}).join('');
+ $('a').innerHTML=`<div class="row"><div class="p" style="flex:2;min-width:300px"><svg viewBox="-235 -215 470 430">${svg}</svg></div><div class="p">
+ <div class="card"><p class="hint">${ph}</p><p>Dados: <b>${d}</b> · Mazo: ${g.deckCount} · <span class="k" style="background:${COL[me.kingdom]}"></span>${esc(me.name)} (${KN[me.kingdom]})</p>
+ <p>${RES.map(r=>`<span class="res">${EMO[r]} ${r}: <b>${me.res[r]}</b></span>`).join('')}</p></div>
+ <div class="card"><button data-a="roll" ${my&&g.phase==='roll'?'':'disabled'}>🎲 Tirar dados</button>
+ ${['road','settlement','city'].map(t=>`<button data-a="tool" data-t="${t}" class="${eff===t?'on':''}" ${main?'':'disabled'}>${{road:'Carretera',settlement:'Asentamiento',city:'Ciudad'}[t]}</button>`).join('')}
+ <button data-a="buyDev" ${main&&afford(me,{lana:1,trigo:1,mineral:1})?'':'disabled'}>Comprar carta</button><button data-a="bank" ${main?'':'disabled'}>Banco/puertos</button><button data-a="offer" ${main?'':'disabled'}>Ofrecer intercambio</button>
+ <button class="pri" data-a="end" ${main?'':'disabled'}>Terminar turno</button>${need?`<button class="pri" data-a="discard">Descartar ${need}</button>`:''}<button data-a="rules">Reglas</button>
+ ${stuck||stuckS?`<p class="hint">Un jugador desconectado bloquea la partida. ${stuckS?'(En la colocación inicial hay que esperar a que vuelva.)':'<button data-a="skip">Saltar su turno</button>'}</p>`:''}</div>
+ <div class="card"><b>Tus cartas de desarrollo:</b><br>${devs}</div>${offers?`<div class="card"><b>Ofertas:</b>${offers}</div>`:''}
+ <div class="card">${g.players.map((p,i)=>`<div>${L.players[i]&&L.players[i].online?'🟢':'⚪'} <span class="k" style="background:${COL[p.kingdom]}"></span><b>${esc(p.name)}</b> · ${p.vp} pts · ${p.res?'':p.resCount+' 🂠 · '}${p.devCount!==undefined?p.devCount+' cartas dev · ':''}⚔${p.knights}${g.longest===i?' 🛣 Camino más largo':''}${g.army===i?' 🛡 Ejército más grande':''}${curp(g)===i&&!ended?' ◀':''}</div>`).join('')}</div>
+ <div id="log" class="card">${g.log.slice(-30).reverse().map(esc).join('<br>')}</div></div></div>`+
+ (ended?`<div class="card"><h1>🏆 ¡Victoria de ${esc(g.players[g.winner].name)} (${KN[g.players[g.winner].kingdom]})!</h1><p style="text-align:center">${g.players.map(p=>`${esc(p.name)}: ${p.vpTotal} pts (${p.pvCards} cartas de punto de victoria ocultas)`).join(' · ')}</p></div>`:'');
+ if(!need&&M==='discard')closeM();if(need&&M!=='discard')discardModal(need);}
+function discardModal(need){M='discard';const me=S.game.players[S.you];
+ modal('Descarta '+need+' cartas',`<p class="muted">Se tiró un 7 y tienes más de 7 cartas.</p>`+RES.map(r=>`<div>${EMO[r]} ${r} (tienes ${me.res[r]}): <input type="number" id="d_${r}" min="0" max="${me.res[r]}" value="0"></div>`).join(''),'Descartar',()=>{
+  const cards={};let sum=0;for(const r of RES){cards[r]=num('d_'+r);sum+=cards[r];}if(sum!==need){toast('Debes descartar exactamente '+need+' cartas.');return false;}M=null;act({type:'discard',cards});},false);}
+
+function render(){if(!S)return;if(S.you<0)return backHome('Tu sesión ya no es válida en esta sala.');S.lobby.started&&S.game?game():(closeMIf(),lobby());}
+function closeMIf(){if(M)closeM();}
+
+// ---------- acciones ----------
+const ACT={
+ create:createGame,join:joinGame,closeM,rules:()=>modal('Reglas',RULES,'',null),
+ copy(){const i=$('lk');i.select();const man=()=>toast('Pulsa Ctrl+C para copiar el enlace ya seleccionado');if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(i.value).then(()=>toast('Enlace copiado'),man);else man();},
+ pick:d=>send({t:'pick',kingdom:d.k}),leave(){if(!confirm('¿Abandonar la sala?'))return;leaving=true;send({t:'leave'});setTimeout(()=>{clearTok(code);location.hash='';backHome();},600);},
+ start:()=>send({t:'start'}),kick:d=>send({t:'kick',index:+d.i}),skip:()=>send({t:'skip'}),
+ roll:()=>act({type:'roll'}),tool:d=>{tool=d.t;render();},settle:d=>act({type:'settlement',vertex:d.v}),city:d=>act({type:'city',vertex:d.v}),road:d=>act({type:'road',edge:d.e}),
+ buyDev:()=>act({type:'buyDev'}),end:()=>act({type:'end'}),accept:d=>act({type:'accept',id:+d.id}),reject:d=>act({type:'reject',id:+d.id}),cancel:d=>act({type:'cancel',id:+d.id}),
+ discard:()=>discardModal(S.game.discard[S.you]),
+ hex(d){const g=S.game,i=+d.i,H=geo.hexes[i];const vs=[...new Set(H.v.map(v=>g.bld[v]).filter(b=>b&&b.p!==S.you).map(b=>b.p))].filter(p=>g.players[p].resCount>0);
+  if(i===g.robber)return toast('Debes mover el ladrón a otro hexágono.');
+  if(vs.length>1)modal('¿A quién robas?',vs.map(p=>`<button data-a="rob" data-i="${i}" data-p="${p}">${esc(g.players[p].name)}</button>`).join(''),'',null);else act({type:'robber',hex:i,victim:vs[0]});},
+ rob(d){closeM();act({type:'robber',hex:+d.i,victim:+d.p});},
+ bank(){const g=S.game,me=g.players[S.you];
+  modal('Comercio con el banco / puertos',`<p>Entregas:</p>${RES.map(r=>`<label class="res"><input type="radio" name="bg" value="${r}" ${me.res[r]>=ratio(g,S.you,r)?'':'disabled'}> ${EMO[r]} ${ratio(g,S.you,r)}:1 (tienes ${me.res[r]})</label>`).join('<br>')}<p>Recibes 1:</p>${RES.map(r=>`<label class="res"><input type="radio" name="bt" value="${r}"> ${EMO[r]} ${r}</label>`).join('')}`,'Intercambiar',()=>{
+   const a=document.querySelector('input[name=bg]:checked'),b=document.querySelector('input[name=bt]:checked');if(!a||!b){toast('Elige qué entregas y qué recibes.');return false;}act({type:'bank',give:a.value,get:b.value});});},
+ offer(){modal('Proponer intercambio a los demás',`<table><tr><td></td><td>Doy</td><td>Pido</td></tr>${RES.map(r=>`<tr><td>${EMO[r]} ${r}</td><td><input type="number" min="0" id="og_${r}" value="0"></td><td><input type="number" min="0" id="ow_${r}" value="0"></td></tr>`).join('')}</table>`,'Proponer',()=>{
+   const give={},want={};for(const r of RES){give[r]=num('og_'+r);want[r]=num('ow_'+r);}act({type:'offer',give,want});});},
+ play(d){const k=d.k;if(k==='caballero')act({type:'knight'});else if(k==='carreteras')act({type:'roads'});
+  else if(k==='monopolio')modal('Monopolio: ¿qué recurso?',RES.map(r=>`<button data-a="mono" data-r="${r}">${EMO[r]} ${r}</button>`).join(''),'',null);
+  else modal('Año de abundancia: elige 2 recursos del banco',`<select id="p1">${RES.map(r=>`<option>${r}</option>`).join('')}</select><select id="p2">${RES.map(r=>`<option>${r}</option>`).join('')}</select>`,'Tomar',()=>act({type:'plenty',r1:$('p1').value,r2:$('p2').value}));},
+ mono(d){closeM();act({type:'monopoly',res:d.r});}
+};
+document.addEventListener('click',e=>{const el=e.target.closest&&e.target.closest('[data-a]');if(!el||el.disabled)return;const f=ACT[el.dataset.a];if(f)f(el.dataset,el);});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&($('nm')===document.activeElement||$('cd')===document.activeElement)&&!busy){const h=$('cd')&&$('cd').value.trim();h?joinGame():createGame();}});
+window.addEventListener('error',e=>{console.error('[catan] error JS',e.message);showErr('Error inesperado en la página: '+e.message);});
+window.addEventListener('unhandledrejection',e=>{console.error('[catan] promesa rechazada',e.reason);showErr('Error inesperado: '+(e.reason&&e.reason.message||e.reason));});
+home();
+(()=>{const h=(location.hash||'').slice(1).toUpperCase().replace(/[^A-Z0-9]/g,'');if(h.length===5&&loadTok(h))enter(h);})();
+</script></body></html>
